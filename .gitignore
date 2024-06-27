@@ -140,3 +140,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# dataset dummy files
+src/dataset/dummy_npy_cubes/

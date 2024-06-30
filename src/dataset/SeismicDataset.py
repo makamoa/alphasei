@@ -5,24 +5,26 @@ from torch.utils.data import Dataset
 import torch 
 from torch.nn.utils.rnn import pad_sequence
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Iterator
 
 
 class SeismicDataset(Dataset):
     """
     A dataset pipeline for dealing with SEGY files
     Args:
-        segy_dir (str): The directory containing the SEGY files
-        structured (bool): Indicate if data is structured or unstructured 
-        mode (str): The mode for loading the data. ['traces', 'inline', 'xline', 'time', 'cube'] 
+        data_src (str): The directory containing the SEGY files
+        structured (bool : True): Indicate if data is structured or unstructured 
+        mode (str : 'traces'): The mode for loading the data. ['traces', 'inline', 'xline', 'time', 'cube'] 
+        stack_cube (bool : true): Indicate if the cube data should be stacked or not (if not then all cubes should be either pre-stacked or post-stacked) - Stacking mechanisme: taking the mean over the offset axis
         transform (callable, optional): Optional transform to be applied to the data 
-        cache_size (int): The size of the cache for storing loaded data (if non-positive no caching is done)
+        cache_size (int : -1): The size of the cache for storing loaded data (if non-positive no caching is done)
     """
     def __init__(self,
-                 data_src: str = None,
+                 data_src: str,
                  structured: bool =True,
                  mode: str ='traces',
-                 transform: str=None,
+                 stack_cube: bool = True,
+                 transform: Any=None,
                  cache_size: int = -1):
         
         if (data_src is None):
@@ -35,6 +37,7 @@ class SeismicDataset(Dataset):
         self.structured: bool = structured
         self.cache_size: int = cache_size
         self.from_np: bool = False
+        self.stack_cube: bool = stack_cube
         
         self._check_mode()
         
@@ -163,26 +166,19 @@ class SeismicDataset(Dataset):
             elif self.mode == 'xline':
                 return file.xline[index]
             elif self.mode == 'cube':
-                """
-                infer the shape of the cube and return the data as a 3D ndarray
-                """
-                d = (len(file.ilines) * len(file.xlines))
-                ntrace = file.tracecount
-                gen = file.gather[:,:,:]
-                shape = (ntrace//d, file.trace[0].shape[0])
-                return self._stack_generator(gen, d, shape) 
+                return segyio.tools.cube(file)
             else: 
                 raise ValueError('Invalid mode')
 
-    def _stack_generator(self, 
-                         gen,
-                         num_items: int,
-                         shape: tuple) -> np.ndarray:
-        result = np.empty((num_items, *shape), dtype=np.float32)
-        for i in range(num_items):
-            result[i] = next(gen)
+    # def _stack_generator(self, 
+    #                      gen,
+    #                      num_items: int,
+    #                      shape: tuple) -> np.ndarray:
+    #     result = np.empty((num_items, *shape), dtype=np.float32)
+    #     for i in range(num_items):
+    #         result[i] = next(gen)
         
-        return result
+    #     return result
 
     def _update_cache(self, 
                       key  : tuple,
@@ -204,13 +200,23 @@ class SeismicDataset(Dataset):
                     del file
                 else:
                     file.close()
-                    
+                 
+    def __iter__(self) -> Iterator[np.ndarray]:
+        for i in range(len(self)):
+            yield self[i]
+    
       
     def _preprocess_data(self,
                          data: np.ndarray) -> np.ndarray:
         """
             @TODO: Preprocess the data 
         """
+        
+        if self.mode == 'cube':
+            if self.stack_cube and len(data.shape) == 4:
+                stacked = np.mean (data, axis=2)
+                print (f"Stacked data shape: {stacked.shape} and pre-stacked data shape: {data.shape}")
+                return stacked
         return data
                 
     @staticmethod
@@ -220,13 +226,31 @@ class SeismicDataset(Dataset):
         """
         batch = [torch.from_numpy(item).float() if isinstance(item, np.ndarray) else item.float() for item in batch]
         
-        if len(batch[0].shape) == 3:
+        if len(batch[0].shape) == 4:
+            for item in batch:
+                assert (len(item.shape) == 4), f"Mixed pre-stacked and post-stacked data"
+            
+            batch.sort(key=lambda x: x.shape[0] * x.shape[1] * x.shape[2] * x.shape[3], reverse=True)
+            max_d, max_h, max_off, max_w = max(item.shape[0] for item in batch), max(item.shape[1] for item in batch), max(item.shape[2] for item in batch), max(item.shape[3] for item in batch)
+            
+            padded_batch = torch.zeros(len(batch), max_d, max_h, max_off, max_w)
+            
+            for i, item in enumerate(batch):
+                d, h, off, w = item.shape
+                padded_batch[i, :d, :h, :off, :w] = item
+            
+            original_shapes = torch.tensor([item.shape for item in batch])
+            
+            return padded_batch, original_shapes
+        
+        elif len(batch[0].shape) == 3:
             batch.sort (key=lambda x: x.shape[0] * x.shape[1] * x.shape[2], reverse=True)
             max_d, max_h, max_w = max(item.shape[0] for item in batch), max(item.shape[1] for item in batch), max(item.shape[2] for item in batch)
             
             padded_batch = torch.zeros(len(batch), max_d, max_h, max_w)
             
             for i, item in enumerate(batch):
+                assert (len (item.shape) == 3), f"Mixed pre-stacked and post-stacked data"
                 d, h, w = item.shape
                 padded_batch[i, :d, :h, :w] = item
             

@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 import json
 from typing import Dict, Any, Iterator, List, Tuple, Union, _TypingEllipsis
 import torch
+import copy
 
 class NpyDataset(Dataset):
     """
@@ -36,15 +37,27 @@ class NpyDataset(Dataset):
                  window_y: int = 128,
                  stride: int = 30,
                  ):
-        self.paths = paths
-        self.dt_t = dt_transformations if isinstance(dt_transformations, list) else [dt_transformations] if dt_transformations else []
-        self.lb_t = lb_transformations if isinstance(lb_transformations, list) else [lb_transformations] if lb_transformations else []
+        self.paths = copy.deepcopy(paths)
+        
+        self.dt_t = []
+        if dt_transformations:
+            if isinstance(dt_transformations, list):
+                self.dt_t = copy.deepcopy(dt_transformations)
+            else:
+                self.dt_t = [copy.deepcopy(dt_transformations)]
+        
+        self.lb_t = []
+        if lb_transformations:
+            if isinstance(lb_transformations, list):
+                self.lb_t = copy.deepcopy(lb_transformations)
+            else:
+                self.lb_t = [copy.deepcopy(lb_transformations)]
+        
         self.dtype = dtype
         self.ltype = ltype
         self.mode = mode
-        self.normalize = norm        
-        if self.normalize:
-            assert self.mode == 'windowed', 'defulate normalization is only supported in original mode'
+        if norm:
+            print("Normalizing the data")
             self.dt_t.append(normalize_slice)
         
         self.window_x = None
@@ -88,6 +101,7 @@ class NpyDataset(Dataset):
     
     def _calculate_window_sizes(self):
         self.window_sizes = []
+        # print ("Calculating window sizes", end = ": ")
         for i, _dt in enumerate(self.raw_data):
             # go over each file once
             ws = {}
@@ -98,18 +112,21 @@ class NpyDataset(Dataset):
             h = _dt.shape[z_pos]
             # slice 1
             w = _dt.shape[y_pos]
-            n_h = (h - self.window_y + 2) // self.stride + 1
-            n_w = (w - self.window_x + 2) // self.stride + 1
+            n_h = max(0 , (h - self.window_y) // self.stride + 1)
+            n_w = max(0, (w - self.window_x) // self.stride + 1)
             
             ws['s1'] = (n_h, n_w)
             
             # slice 2
             w = _dt.shape[x_pos]
-            n_h = (h - self.window_y + 2) // self.stride + 1
-            n_w = (w - self.window_x + 2) // self.stride + 1
+            n_h = max(0, (h - self.window_y) // self.stride + 1)
+            n_w = max(0, (w - self.window_x) // self.stride + 1)
             
             ws['s2'] = (n_h, n_w)
-            self.window_sizes.append(ws)     
+            
+            # print (ws, end = ", ")
+            self.window_sizes.append(copy.deepcopy(ws))   
+        # print ("=============")
     
     def _windowed_slices_len(self) -> int:
         return sum([ws['s1'][0] * ws['s1'][1] + ws['s2'][0] * ws['s2'][1] for ws in self.window_sizes])
@@ -164,7 +181,6 @@ class NpyDataset(Dataset):
         return _dt, _lb
     
     def _get_windowed_slice(self, idx: int) -> tuple [np.ndarray, np.ndarray]:
-        # print ("Starting at", idx)
         # find the file that contains the index
         _idx = idx
         _file_idx = 0
@@ -206,14 +222,15 @@ class NpyDataset(Dataset):
         _dt = get_transposed_slice(_dt, _or, ('z', 'x', 'y'), slice_idx).astype(self.dtype)
         _lb = get_transposed_slice(_lb, _or, ('z', 'x', 'y'), slice_idx).astype(self.ltype)
         
+        # get the window from the slice 
+        _dt, _lb = self._get_window(_dt, _lb, window_idx, _ws)
+        
         for t in self.dt_t:
             _dt = t(_dt)
             
         for t in self.lb_t:
             _lb = t(_lb)
             
-        # get the window from the slice 
-        _dt, _lb = self._get_window(_dt, _lb, window_idx, _ws)
         
         return _dt, _lb
     
@@ -276,16 +293,17 @@ class NpyDataset(Dataset):
         Create a collate function that return windowed slices:
             if in windowed mode, the collate function would use a batch of windowed slices as specified by the class parameters, and return them 
              - Here you would get the same number of samples as the batch size
+             - norm_falg: normalize each window in the batch
+                - Note: if the dataset normalization flag is on then this would result in applying normalization twice on each window
             
             if in original mode, the collate function would use a batch of full slices, window them and return them
             - Here your batch is how many slices to use 
             - The number of samples returned would be the number of windows created using these slices
+            - norm_falg: normalize each window in the batch
+                - Note: if the dataset normalization flag is on then this would result in applying normalization twice (once on the slice and once on the window)
         """
-        
-        if self.mode == 'windowed':
-            if self.normalize: # normalization is done in the __getitem__ method
-                norm_flag = False 
-                
+    
+        if self.mode == 'windowed':            
             def windowed_collate(batch):
                 # Batch is already windowed, just need to stack and convert to tensors
                 data = [item[0] for item in batch]
@@ -296,13 +314,13 @@ class NpyDataset(Dataset):
                 labels = torch.stack([torch.from_numpy(l) for l in labels])
                 
                 if norm_flag: 
-                    print ("normalizing----------")
+                    print ("normalizing windows")
                     # normalize each item in the batch (a single window)
                     data = normalize_windows(data)
-                    
-                
                 return data, labels
-            return windowed_collate
+            
+            return copy.deepcopy(windowed_collate)
+        
         elif self.mode == 'original':
             def original_collate(batch):
                 # print("Original collate")
@@ -310,6 +328,7 @@ class NpyDataset(Dataset):
                 data_windows_list = []
                 label_windows_list = []
                 
+                # one item at a time as the slices might be in different shapes
                 for item in batch:
                     data = torch.from_numpy(item[0])
                     label = torch.from_numpy(item[1])
@@ -336,8 +355,10 @@ class NpyDataset(Dataset):
                 
                 return data_windows, label_windows
             
-            return original_collate
+            return copy.deepcopy(original_collate)
         
+        
+# helper functions
 def get_transposed_slice(
         data: np.ndarray,
         current_order: Tuple[str, str, str],
@@ -345,17 +366,16 @@ def get_transposed_slice(
         transposed_index: Tuple[Union[int, slice], Union[int, slice], Union[int, slice]]
     ) -> np.ndarray:
         """
-        Get a slice from the original 3D data as if it were transposed, without actually transposing.
-        Supports advanced indexing including negative indices, ellipsis, and integer arrays.
+        Get a slice from the original 3D data as if it were transposed, without transposing.
         
         Args:
         data: The original 3D numpy array
         current_order: Tuple representing the current order of dimensions (e.g., ('x', 'y', 'z'))
         transposed_order: Tuple representing the desired order of dimensions (e.g., ('z', 'x', 'y'))
-        transposed_index: The index or slice in the transposed order, can be int, slice, tuple, list, np.ndarray, or Ellipsis
+        transposed_index: The index or slice in the transposed order, must be a 3-tuple with either integers or slices
         
         Returns:
-        np.ndarray: The requested slice of data
+        np.ndarray: The slice of the data as if it were transposed
         """
         dim_map = tuple(current_order.index(dim) for dim in transposed_order)
         
@@ -368,6 +388,7 @@ def get_transposed_slice(
         
         remaining_dims = [(i if i < len(result.shape) else len(result.shape) - 1) for i, idx in enumerate(transposed_index)]
         
+        # account for the need to transpose the final result 
         if len(remaining_dims) > 1:
             transpose_map = {dim_map[i]: i for i in remaining_dims}
             transpose_order = tuple(transpose_map[i] for i in range(3) if i in transpose_map)
@@ -375,14 +396,19 @@ def get_transposed_slice(
         
         return result
     
-def normalize_windows(windows):
-    # Normalize each window individually
+def normalize_windows(windows): 
+    # Given a batch of windows, normalize each window individually
     mean = windows.mean(dim=(1, 2), keepdim=True)
     std = windows.std(dim=(1, 2), keepdim=True)
-    return (windows - mean) / (std + 1e-8) 
+    # print ("Mean:", mean, "Std:", std)
+    windows = (windows - mean) / (std + 1e-8)
+    return windows
 
 def normalize_slice(slice):
+    # print ("----------- Normalizing Slice ------------------", slice.mean(), slice.std())
     # Normalize a single slice
     mean = slice.mean()
     std = slice.std()
-    return (slice - mean) / (std + 1e-8)
+    slice =(slice - mean) / (std + 1e-8)
+    # print ("Normalized:", slice.mean(), slice.std())
+    return slice

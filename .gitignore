@@ -143,4 +143,4 @@ dmypy.json
 
 # dataset dummy files
 src/dataset/dummy_npy_cubes/
-src/data/
+src/dataset/data/

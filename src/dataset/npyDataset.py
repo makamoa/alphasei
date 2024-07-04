@@ -4,13 +4,15 @@ import json
 from typing import Dict, Any, Iterator, List, Tuple, Union, _TypingEllipsis
 import torch
 import copy
+import os
 
 class NpyDataset(Dataset):
     """
     A dataset class for dealing with npy seismic files 
     Args:
         data_src (str): A list of dictionaries containing the paths to the seismic data and labels 
-            - [{'train': cube_path, 'label': labels_path, order : ('x', 'y', 'z')}, ...]
+            - [{'train': cube_path, 'label': labels_path, 'order' : ('x', 'y', 'z'), 'range' : {'x': (st, end) , 'y': (st, end)} }, ...]
+            - Note: the range is optional and it should be in percentage, if not provided the full range is used
         dt_transformations (List[Callable]): A list of transformations to apply to the data
         lb_transformations (List[Callable]): A list of transformations to apply to the labels
         mode (str): The mode to use for the dataset (default: 'windowed', 'original')
@@ -39,6 +41,8 @@ class NpyDataset(Dataset):
                  ):
         self.paths = copy.deepcopy(paths)
         
+        self.raw_data, self.raw_labels, self.orders, self.ranges, self.n_slices_per_file = self._initialize_data() #        
+        
         self.dt_t = []
         if dt_transformations:
             if isinstance(dt_transformations, list):
@@ -53,8 +57,8 @@ class NpyDataset(Dataset):
             else:
                 self.lb_t = [copy.deepcopy(lb_transformations)]
         
-        self.dtype = dtype
-        self.ltype = ltype
+        self.dtype = np.dtype(dtype)
+        self.ltype = np.dtype(ltype)
         self.mode = mode
         if norm:
             print("Normalizing the data")
@@ -64,7 +68,7 @@ class NpyDataset(Dataset):
         self.window_y = None
         self.stride = None
         self.padding = None
-        self.raw_data, self.raw_labels, self.orders, self.n_slices_per_file = self._initialize_data() #          
+          
         if self.mode == 'windowed':
             self.window_x = window_x
             self.window_y = window_y 
@@ -75,18 +79,41 @@ class NpyDataset(Dataset):
         data = []
         labels = []
         orders = []
+        ranges = []
         n_slices = []
         
         for path in self.paths:
             _dt = np.load(path['train'], mmap_mode='r')
             _lb = np.load(path['label'], mmap_mode='r')
-
+            _or = path['order']
+            
+            x_pos = _or.index('x')
+            y_pos = _or.index('y')
+            
+            x_st = 0
+            x_end = _dt.shape[x_pos]
+            y_st = 0
+            y_end = _dt.shape[y_pos]
+            
+            if path.get('range') is not None:
+                
+                x_range = path['range']['x']
+                if x_range:
+                    x_st = (int) (x_range[0] * _dt.shape[x_pos])
+                    x_end = (int) (x_range[1] * _dt.shape[x_pos])
+                
+                y_range = path['range']['y']
+                if y_range:
+                    y_st = (int) (y_range[0] * _dt.shape[y_pos])
+                    y_end = (int) (y_range[1] * _dt.shape[y_pos])
+            
             data.append(_dt)
             labels.append(_lb)
             orders.append(path['order'])
-            n_slices.append(_dt.shape[1] + _dt.shape[2])
+            ranges.append((x_st, x_end, y_st, y_end))
+            n_slices.append((x_end - x_st) + (y_end - y_st))
             
-        return data, labels, orders, n_slices
+        return data, labels, orders, ranges, n_slices
     
     def __len__(self) -> int:
         if self.mode == 'original':
@@ -99,26 +126,40 @@ class NpyDataset(Dataset):
     def _slices_len(self) -> int: 
         return sum(self.n_slices_per_file)
     
+    def _get_shape (self, f_idx: int, dim: str) -> int:
+        _dt = self.raw_data[f_idx]
+        _or = self.orders[f_idx]
+        _pos = _or.index(dim)
+        if dim == 'z': 
+            return _dt.shape[_pos]
+        if dim == 'x': 
+            _rg = self.ranges[f_idx]
+            x_st, x_end, _, _ = _rg
+            return x_end - x_st
+        if dim == 'y':
+            _rg = self.ranges[f_idx]
+            _, _, y_st, y_end = _rg
+            return y_end - y_st
+        
+        raise ValueError(f"Invalid dimension {dim}")
+    
     def _calculate_window_sizes(self):
         self.window_sizes = []
         # print ("Calculating window sizes", end = ": ")
         for i, _dt in enumerate(self.raw_data):
             # go over each file once
             ws = {}
-            x_pos = self.orders[i].index('x')
-            y_pos = self.orders[i].index('y')
-            z_pos = self.orders[i].index('z')
             
-            h = _dt.shape[z_pos]
+            h = self._get_shape(i, 'z')
             # slice 1
-            w = _dt.shape[y_pos]
+            w = self._get_shape(i, 'y')
             n_h = max(0 , (h - self.window_y) // self.stride + 1)
             n_w = max(0, (w - self.window_x) // self.stride + 1)
             
             ws['s1'] = (n_h, n_w)
             
             # slice 2
-            w = _dt.shape[x_pos]
+            w = self._get_shape(i, 'x')
             n_h = max(0, (h - self.window_y) // self.stride + 1)
             n_w = max(0, (w - self.window_x) // self.stride + 1)
             
@@ -154,19 +195,24 @@ class NpyDataset(Dataset):
         _dt = self.raw_data[_file_idx]
         _lb = self.raw_labels[_file_idx]
         _or = self.orders[_file_idx]
+        _rg = self.ranges[_file_idx]
         
         idx -= sum(self.n_slices_per_file[:_file_idx])
         
         # find the 'x' index in _or
-        x_pos = _or.index('x')
-        # find the 'y' index in _or
-        y_pos = _or.index('y')
+        x_dim = self._get_shape(_file_idx, 'x')
         
         # assuming the data is transposed to ('z', 'x', 'y') -- done on the fly later on 
-        if idx < _dt.shape[x_pos]:
-            idx = (slice(None), idx, slice(None))
+        if idx < x_dim:
+            # indexing along the x axis
+            idx += _rg[0] # add the starting index
+            y_slice = slice(_rg[2], _rg[3]) # get the y slice
+            idx = (slice(None), idx, y_slice)
         else:
-            idx = (slice(None), slice(None), idx - _dt.shape[x_pos])
+            # indexing along the y axis
+            idx += _rg[2] # add the starting index
+            x_slice = slice(_rg[0], _rg[1]) # get the x slice
+            idx = (slice(None), x_slice, idx - x_dim)
         
         # print (_file_idx, idx, x_pos)
         _dt = get_transposed_slice(_dt, _or, ('z', 'x', 'y'), idx).astype(self.dtype)
@@ -195,6 +241,7 @@ class NpyDataset(Dataset):
         _dt = self.raw_data[_file_idx]
         _lb = self.raw_labels[_file_idx]
         _or = self.orders[_file_idx]
+        _rg = self.ranges[_file_idx]
         _ws = self.window_sizes[_file_idx]
         
         x_pos = _or.index('x')
@@ -203,19 +250,23 @@ class NpyDataset(Dataset):
         
         # find the slice that contains the index
         # s1 moves along the x axis first
-        if _idx < _ws['s1'][0] * _ws['s1'][1] * _dt.shape[x_pos]:
-            # from an iline
-            
+        x_dim = self._get_shape(_file_idx, 'x')
+        if _idx < _ws['s1'][0] * _ws['s1'][1] * x_dim:
+            # along the x axis
             slice_idx = _idx // (_ws['s1'][0] * _ws['s1'][1])
+            y_slice = slice(_rg[2], _rg[3]) # get the y slice
+            slice_idx = (slice(None), slice_idx, y_slice)
+            
             window_idx = _idx % (_ws['s1'][0] * _ws['s1'][1])
-            slice_idx = (slice(None), slice_idx, slice(None))
             # print ("getting an inline at ", slice_idx, "window at", window_idx)
             _ws = _ws['s1']
         else:
             # from a crossline
-            slice_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * _dt.shape[x_pos]) // (_ws['s2'][0] * _ws['s2'][1])
-            window_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * _dt.shape[x_pos]) % (_ws['s2'][0] * _ws['s2'][1])
-            slice_idx = (slice(None), slice(None), slice_idx)
+            slice_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * x_dim) // (_ws['s2'][0] * _ws['s2'][1])
+            x_slice = slice(_rg[0], _rg[1]) # get the x slice
+            slice_idx = (slice(None), x_slice, slice_idx)
+            
+            window_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * x_dim) % (_ws['s2'][0] * _ws['s2'][1])
             _ws = _ws['s2']
             # print ("getting a xline at ", slice_idx, "window at", window_idx)
         
@@ -256,6 +307,22 @@ class NpyDataset(Dataset):
     def __iter__(self) -> Iterator[tuple [np.ndarray, np.ndarray]]:
         for i in range(len(self)):
             yield self[i]
+    
+    def get_config(self) -> Dict[str, Any]:
+        # compose all the metadata of the dataset to a dictionary
+        config = {
+            'paths': self.paths,
+            'dt_transformations': [t.__name__ for t in self.dt_t],
+            'lb_transformations': [t.__name__ for t in self.lb_t],
+            'dtype': str(self.dtype),
+            'ltype': str(self.ltype),
+            'norm': self.norm if hasattr(self, 'norm') else False,
+            'mode': self.mode,
+            'window_x': self.window_x,
+            'window_y': self.window_y,
+            'stride': self.stride
+        }
+        return config
            
     def save_dataset(self,
                      path: str, 
@@ -276,16 +343,43 @@ class NpyDataset(Dataset):
         raise NotImplementedError("Method not implemented")
         pass
     
-    @classmethod
-    def from_path(cls, path: str, new_dtransformations: list[callable]=[], new_lbtransformations: list[callable]=[]):
+    def save_config(self, path: str) -> str:
         """
-        Class method to create and return a new instance of DatasetLoader from a given npy path - created by save_dataset function
-        - new_dtransformations: list of new data transformations to apply
-        - new_lbtransformations: list of new label transformations to apply
+        Save the metadata of the dataset to a given path or a json file
+        
+        Returns:
+        str: The path to the saved file
         """
-        raise NotImplementedError("Method not implemented")
-        pass
+        # check if the path is a directory or json file
+        if path.endswith('.json'):
+            with open(path, 'w') as f:
+                mt = self.get_config()
+                print (mt)
+                json.dump(mt, f)
+                return path
+        else: 
+            # make sure the path exists and is a directory
+            if not os.path.exists(path):
+                os.makedirs(path)
+            with open(os.path.join(path, 'metadata.json'), 'w') as f:
+                json.dump(self.get_metadata(), f)              
+            return os.path.join(path, 'metadata.json')
     
+    @classmethod
+    def from_config(cls, path: str) -> 'NpyDataset':
+        """
+        Load the metadata of the dataset from a given path
+        """
+        with open(path, 'r') as f:
+            config = json.load(f)
+            config['dtype'] = np.dtype(config['dtype'])
+            config['ltype'] = np.dtype(config['ltype'])
+            
+            # Recreate transformation functions (assuming they are defined in the global scope)
+            config['dt_transformations'] = [globals()[name] for name in config['dt_transformations']]
+            config['lb_transformations'] = [globals()[name] for name in config['lb_transformations']]
+        
+            return cls(**config)        
     
     @staticmethod
     def create_windowed_collate_fn(self, norm_flag: bool = True, window_x: int = 128, window_y: int = 128, stride: int = 30):
@@ -349,7 +443,7 @@ class NpyDataset(Dataset):
                 label_windows = torch.cat(label_windows_list, dim=0)
                 
                 if norm_flag: 
-                    print ("normalizing----------")
+                    # print ("normalizing----------")
                     # normalize each item in the batch (a single window)
                     data_windows = normalize_windows(data_windows)
                 

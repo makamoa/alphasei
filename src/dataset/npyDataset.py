@@ -9,23 +9,27 @@ import os
 class NpyDataset(Dataset):
     """
     A dataset class for dealing with npy seismic files 
+    Data is asummed to be in the format (z, x, y), the order of the dimensions can be specified but would be transposed on the fly
     Args:
         data_src (str): A list of dictionaries containing the paths to the seismic data and labels 
             - [{'train': cube_path, 'label': labels_path, 'order' : ('x', 'y', 'z'), 'range' : {'x': (st, end) , 'y': (st, end)} }, ...]
-            - Note: the range is optional and it should be in percentage, if not provided the full range is used
-        dt_transformations (List[Callable]): A list of transformations to apply to the data
-        lb_transformations (List[Callable]): A list of transformations to apply to the labels
-        mode (str): The mode to use for the dataset (default: 'windowed', 'original')
+            - Note: the range is optional and it should be between 0-1, if not provided the full range is used
+        lb_transformations (List[Callable]/Callable): Transformations to apply to the labels
+        dt_transformations (List[Callable]/Callable): Transformations to apply to the data
+        mode (str): The mode to use for the dataset (default: 'windowed', 'slice')
             - 'windowed': Return windowed slices of the data 
-            - 'original': Return full slices of the data
+            - 'slice'   : Return full slices of the data
+            - 'trace'   : Return a single trace of the data
         dtype (np.dtype): The datatype to use for the data   (default: np.float32)
         ltype (np.dtype): The datatype to use for the labels (default: np.float32)
         norm: (bool): Whether to normalize the data when loading (default: False)
-            - in original mode, the data is normalized slice by slice
+            - in slice mode, the data is normalized slice by slice
             - in windowed mode, the data is normalized window by window
-        window_x (int): The width of the windowed slice (default: 128)
-        window_y (int): The height of the windowed slice (default: 128)
-        stride (int): The stride to use when creating windowed slices (default: 30)
+            - in trace mode, the data is normalized trace by trace
+        Only in windowed mode:
+            - window_x (int): The width of the windowed slice (default: 128)  - depth of the slice
+            - window_y (int): The height of the windowed slice (default: 128) - width of the slice
+            - stride   (int): The stride to use when creating windowed slices (default: 30)
     """
     def __init__(self,
                  paths: List[Any] = [],
@@ -34,14 +38,18 @@ class NpyDataset(Dataset):
                  dtype: np.dtype = np.float32,
                  ltype: np.dtype = np.float32, 
                  norm: bool = False,
-                 mode = 'original', 
+                 mode: str = 'slice', 
                  window_x: int = 128,
                  window_y: int = 128,
                  stride: int = 30,
                  ):
-        self.paths = copy.deepcopy(paths)
+        validmodes = ['slice', 'windowed', 'traces']
+        if mode not in validmodes:
+            raise ValueError(f"Invalid mode {mode}")
         
-        self.raw_data, self.raw_labels, self.orders, self.ranges, self.n_slices_per_file = self._initialize_data() #        
+        self.paths = copy.deepcopy(paths)
+        self.mode = mode
+        self.raw_data, self.raw_labels, self.orders, self.ranges, self.n_items_per_file = self._initialize_data() 
         
         self.dt_t = []
         if dt_transformations:
@@ -58,11 +66,11 @@ class NpyDataset(Dataset):
                 self.lb_t = [copy.deepcopy(lb_transformations)]
         
         self.dtype = np.dtype(dtype)
-        self.ltype = np.dtype(ltype)
-        self.mode = mode
+        self.ltype = np.dtype(ltype)        
+        
         if norm:
             print("Normalizing the data")
-            self.dt_t.append(normalize_slice)
+            self.dt_t.append(normalize_item)
         
         self.window_x = None
         self.window_y = None
@@ -80,7 +88,7 @@ class NpyDataset(Dataset):
         labels = []
         orders = []
         ranges = []
-        n_slices = []
+        n_items = []
         
         for path in self.paths:
             _dt = np.load(path['train'], mmap_mode='r')
@@ -94,38 +102,76 @@ class NpyDataset(Dataset):
             x_end = _dt.shape[x_pos]
             y_st = 0
             y_end = _dt.shape[y_pos]
+            self.window_sizes =[]
             
             if path.get('range') is not None:
-                
                 x_range = path['range']['x']
                 if x_range:
                     x_st = (int) (x_range[0] * _dt.shape[x_pos])
                     x_end = (int) (x_range[1] * _dt.shape[x_pos])
+                else: 
+                    raise ValueError(f"Invalid range {path['range']}")
                 
                 y_range = path['range']['y']
                 if y_range:
                     y_st = (int) (y_range[0] * _dt.shape[y_pos])
                     y_end = (int) (y_range[1] * _dt.shape[y_pos])
+                else: 
+                    raise ValueError(f"Invalid range {path['range']}")
             
             data.append(_dt)
             labels.append(_lb)
             orders.append(path['order'])
             ranges.append((x_st, x_end, y_st, y_end))
-            n_slices.append((x_end - x_st) + (y_end - y_st))
+            if self.mode == 'traces':
+                n_items.append((x_end - x_st) * (y_end - y_st))
+            else:
+                n_items.append((x_end - x_st) + (y_end - y_st))
             
-        return data, labels, orders, ranges, n_slices
+        return data, labels, orders, ranges, n_items
     
     def __len__(self) -> int:
-        if self.mode == 'original':
+        if self.mode == 'slice':
             return self._slices_len()
         elif self.mode == 'windowed':
             return self._windowed_slices_len()
+        elif self.mode == 'traces':
+            return self._num_traces()
         else:
             raise ValueError(f"Invalid mode {self.mode}")
     
-    def _slices_len(self) -> int: 
-        return sum(self.n_slices_per_file)
+    def _num_traces(self) -> int:
+        return sum(self.n_items_per_file)
     
+    def _slices_len(self) -> int: 
+        return sum(self.n_items_per_file)
+    
+    def _calculate_window_sizes(self):
+        self.window_sizes = []
+        # print ("Calculating window sizes", end = ": ")
+        for i, _dt in enumerate(self.raw_data):
+            # go over each file once
+            ws = {}
+            
+            h = self._get_shape(i, 'z')
+            # slice 1
+            w = self._get_shape(i, 'y')
+            n_h = max(0, (h - self.window_y) // self.stride + 1)
+            n_w = max(0, (w - self.window_x) // self.stride + 1)
+            
+            ws['s1'] = (n_h, n_w)
+            
+            # slice 2
+            w = self._get_shape(i, 'x')
+            n_h = max(0, (h - self.window_y) // self.stride + 1)
+            n_w = max(0, (w - self.window_x) // self.stride + 1)
+            
+            ws['s2'] = (n_h, n_w)
+            
+            # print (ws, end = ", ")
+            self.window_sizes.append(copy.deepcopy(ws))   
+        # print ("=============")
+        
     def _get_shape (self, f_idx: int, dim: str) -> int:
         _dt = self.raw_data[f_idx]
         _or = self.orders[f_idx]
@@ -143,43 +189,71 @@ class NpyDataset(Dataset):
         
         raise ValueError(f"Invalid dimension {dim}")
     
-    def _calculate_window_sizes(self):
-        self.window_sizes = []
-        # print ("Calculating window sizes", end = ": ")
-        for i, _dt in enumerate(self.raw_data):
-            # go over each file once
-            ws = {}
-            
-            h = self._get_shape(i, 'z')
-            # slice 1
-            w = self._get_shape(i, 'y')
-            n_h = max(0 , (h - self.window_y) // self.stride + 1)
-            n_w = max(0, (w - self.window_x) // self.stride + 1)
-            
-            ws['s1'] = (n_h, n_w)
-            
-            # slice 2
-            w = self._get_shape(i, 'x')
-            n_h = max(0, (h - self.window_y) // self.stride + 1)
-            n_w = max(0, (w - self.window_x) // self.stride + 1)
-            
-            ws['s2'] = (n_h, n_w)
-            
-            # print (ws, end = ", ")
-            self.window_sizes.append(copy.deepcopy(ws))   
-        # print ("=============")
-    
     def _windowed_slices_len(self) -> int:
-        return sum([ws['s1'][0] * ws['s1'][1] + ws['s2'][0] * ws['s2'][1] for ws in self.window_sizes])
+        return sum([ws['s1'][0] * ws['s1'][1] *self._get_shape(i, 'x') + ws['s2'][0] * ws['s2'][1] * self._get_shape(i, 'y') for i,  ws in enumerate (self.window_sizes)])
     
     def __getitem__(self, idx) -> tuple [np.ndarray, np.ndarray]:
-        if self.mode == 'original': 
+        if self.mode == 'slice': 
             return self._get_original_slice(idx)
         elif self.mode == 'windowed':
             return self._get_windowed_slice(idx)
+        elif self.mode == 'traces':
+            return self._get_trace(idx)
         else:
             raise ValueError(f"Invalid mode {self.mode}")       
+        
+    def _get_trace(self, idx: int) -> tuple [np.ndarray]:
+        """
+        Get the trace at the given index and its label
+        """
+        _idx = idx
+        _file_idx = 0
+        while _idx >= self.n_items_per_file[_file_idx]:
+            _idx -= self.n_items_per_file[_file_idx]
+            _file_idx += 1
+        
+        # print ("in file", _file_idx, "index", _idx, "total items", self.n_items_per_file[_file_idx])
+        
+        _dt = self.raw_data[_file_idx]
+        _lb = self.raw_labels[_file_idx]
+        _rg = self.ranges[_file_idx]
+        _or = self.orders[_file_idx]
+        
+        idx -= sum(self.n_items_per_file[:_file_idx])
+        
+        # print ("searching for which iline in: ", (_rg[3] , " to ",  _rg[2]))
+        
+        iline_idx = idx // (_rg[3] - _rg[2]) + _rg[2]
+        
+        # print ("getting iline at", iline_idx)
+        
+        iline_idx = (slice(None),  iline_idx, slice(None))
+        
 
+        # get the iline slice of the data
+        _dt = get_transposed_slice(_dt, _or, ('z', 'x', 'y'), iline_idx).astype(self.dtype)
+        _lb = get_transposed_slice(_lb, _or, ('z', 'x', 'y'), iline_idx).astype(self.ltype)
+        # shape: (z, x)
+        
+        # print (_dt.shape, _lb.shape)
+        
+        
+        # find which trace to get
+        trace_idx = idx % (_rg[3] - _rg[2]) + _rg[2]
+        
+        # print ("getting trace number:", trace_idx)
+        
+        _dt = _dt[:, trace_idx]
+        _lb = _lb[:, trace_idx]
+        
+        for t in self.dt_t:
+            _dt = t(_dt)
+        
+        for t in self.lb_t:
+            _lb = t(_lb)
+            
+        return _dt, _lb
+        
     def _get_original_slice(self, idx: int) -> tuple [np.ndarray, np.ndarray]:
         """
         Get the original slice of seismic data and labels
@@ -188,8 +262,8 @@ class NpyDataset(Dataset):
         # find the file that contains the index
         _idx = idx
         _file_idx = 0
-        while _idx >= self.n_slices_per_file[_file_idx]:
-            _idx -= self.n_slices_per_file[_file_idx]
+        while _idx >= self.n_items_per_file[_file_idx]:
+            _idx -= self.n_items_per_file[_file_idx]
             _file_idx += 1
         
         _dt = self.raw_data[_file_idx]
@@ -197,7 +271,7 @@ class NpyDataset(Dataset):
         _or = self.orders[_file_idx]
         _rg = self.ranges[_file_idx]
         
-        idx -= sum(self.n_slices_per_file[:_file_idx])
+        idx -= sum(self.n_items_per_file[:_file_idx])
         
         # find the 'x' index in _or
         x_dim = self._get_shape(_file_idx, 'x')
@@ -230,8 +304,8 @@ class NpyDataset(Dataset):
         # find the file that contains the index
         _idx = idx
         _file_idx = 0
-        while _idx >= self.window_sizes[_file_idx]['s1'][0] * self.window_sizes[_file_idx]['s1'][1] + self.window_sizes[_file_idx]['s2'][0] * self.window_sizes[_file_idx]['s2'][1]:
-            f_items = self.window_sizes[_file_idx]['s1'][0] * self.window_sizes[_file_idx]['s1'][1] + self.window_sizes[_file_idx]['s2'][0] * self.window_sizes[_file_idx]['s2'][1]
+        while _idx >= self.window_sizes[_file_idx]['s1'][0] * self.window_sizes[_file_idx]['s1'][1] * self._get_shape(_file_idx, 'x') + self.window_sizes[_file_idx]['s2'][0] * self.window_sizes[_file_idx]['s2'][1]* self._get_shape(_file_idx, 'y'):
+            f_items = self.window_sizes[_file_idx]['s1'][0] * self.window_sizes[_file_idx]['s1'][1] * self._get_shape(_file_idx, 'x') + self.window_sizes[_file_idx]['s2'][0] * self.window_sizes[_file_idx]['s2'][1]* self._get_shape(_file_idx, 'y')
             # print ("File at", _file_idx, "index at", _idx, "items", f_items)
             _idx -= f_items
             _file_idx += 1
@@ -415,7 +489,7 @@ class NpyDataset(Dataset):
             
             return copy.deepcopy(windowed_collate)
         
-        elif self.mode == 'original':
+        elif self.mode == 'slice':
             def original_collate(batch):
                 # print("Original collate")
                 # Process each slice individually
@@ -436,6 +510,8 @@ class NpyDataset(Dataset):
                     data_windows = data_windows.reshape(-1, window_h, window_w)
                     label_windows = label_windows.reshape(-1, window_h, window_w)
                     
+                    # print (data_windows.shape, label_windows.shape)
+                    
                     data_windows_list.append(data_windows)
                     label_windows_list.append(label_windows)
                 
@@ -450,6 +526,45 @@ class NpyDataset(Dataset):
                 return data_windows, label_windows
             
             return copy.deepcopy(original_collate)
+            
+        elif self.mode == 'traces':
+            def traces_collate(batch):
+                # Process each slice individually
+                # window the traces by the given window_x 
+                # window_y is redundant as it is always 1
+                
+                data_windows_list = []
+                label_windows_list = []
+                
+                # one item at a time as the traces might be of different lengths
+                for item in batch:
+                    data = torch.from_numpy(item[0]) # shape: (z, )
+                    label = torch.from_numpy(item[1]) # shape: (z, )
+                    
+                    # window over the z axis
+                    data_windows = data.unfold(0, window_x, stride)
+                    label_windows = label.unfold(0, window_x, stride)
+                    
+                    # Reshape to have all windows as the first dimension
+                    h, window_h = data_windows.shape
+                    
+                    data_windows = data_windows.reshape(-1, window_h)
+                    label_windows = label_windows.reshape(-1, window_h)
+                    
+                    
+                    data_windows_list.append(data_windows)
+                    label_windows_list.append(label_windows)
+                
+                data_windows = torch.cat(data_windows_list, dim=0)
+                label_windows = torch.cat(label_windows_list, dim=0)
+                
+                if norm_flag:
+                    # normalize each item in the batch (a single window)
+                    data_windows = normalize_windows(data_windows)
+                    
+                return data_windows, label_windows
+            
+            return copy.deepcopy(traces_collate)
         
         
 # helper functions
@@ -490,19 +605,34 @@ def get_transposed_slice(
         
         return result
     
+def normalize_trace(trace):
+    # Normalize a single trace
+    mean = trace.mean()
+    std = trace.std()
+    trace = (trace - mean) / (std + 1e-8)
+    return trace
+    
 def normalize_windows(windows): 
-    # Given a batch of windows, normalize each window individually
-    mean = windows.mean(dim=(1, 2), keepdim=True)
-    std = windows.std(dim=(1, 2), keepdim=True)
-    # print ("Mean:", mean, "Std:", std)
-    windows = (windows - mean) / (std + 1e-8)
+    if windows.ndim == 3:
+        # shape (batch, z, x)
+        # Given a batch of windows, normalize each window individually
+        mean = windows.mean(dim=(1, 2), keepdim=True)
+        std = windows.std(dim=(1, 2), keepdim=True)
+        # print ("Mean:", mean, "Std:", std)
+        windows = (windows - mean) / (std + 1e-8)
+    else: 
+        # shape: (batch, z)
+        mean = windows.mean(dim=1, keepdim=True)
+        std = windows.std(dim=1, keepdim=True)
+        windows = (windows - mean) / (std + 1e-8)
+        
     return windows
 
-def normalize_slice(slice):
+def normalize_item(item):
     # print ("----------- Normalizing Slice ------------------", slice.mean(), slice.std())
     # Normalize a single slice
-    mean = slice.mean()
-    std = slice.std()
-    slice =(slice - mean) / (std + 1e-8)
+    mean = item.mean()
+    std = item.std()
+    item =(item - mean) / (std + 1e-8)
     # print ("Normalized:", slice.mean(), slice.std())
-    return slice
+    return item

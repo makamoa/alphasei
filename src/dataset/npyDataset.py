@@ -27,9 +27,10 @@ class NpyDataset(Dataset):
             - in windowed mode, the data is normalized window by window
             - in trace mode, the data is normalized trace by trace
         Only in windowed mode:
-            - window_x (int): The width of the windowed slice (default: 128)  - depth of the slice
-            - window_y (int): The height of the windowed slice (default: 128) - width of the slice
-            - stride   (int): The stride to use when creating windowed slices (default: 30)
+            - window_w (int): The width of the windowed slice (default: 128)  - depth of the slice
+            - window_h (int): The height of the windowed slice (default: 128) - width of the slice
+            - stride_w (int): The stride to use when creating windowed slices on width (default: 30)
+            - stride_h (int): The stride to use when creating windowed slices on width (default: 30)
     """
     def __init__(self,
                  paths: List[Any] = [],
@@ -39,9 +40,10 @@ class NpyDataset(Dataset):
                  ltype: np.dtype = np.float32, 
                  norm: bool = False,
                  mode: str = 'slice', 
-                 window_x: int = 128,
-                 window_y: int = 128,
-                 stride: int = 30,
+                 window_w: int = 128,
+                 window_h: int = 128,
+                 stride_w: int = 30,
+                 stride_h: int = 30
                  ):
         validmodes = ['slice', 'windowed', 'traces']
         if mode not in validmodes:
@@ -72,15 +74,17 @@ class NpyDataset(Dataset):
             print("Normalizing the data")
             self.dt_t.append(normalize_item)
         
-        self.window_x = None
-        self.window_y = None
-        self.stride = None
+        self.window_w = None
+        self.window_h = None
+        self.stride_w = None
+        self.stride_h = None
         self.padding = None
           
         if self.mode == 'windowed':
-            self.window_x = window_x
-            self.window_y = window_y 
-            self.stride = stride
+            self.window_w = window_w
+            self.window_h = window_h 
+            self.stride_w = stride_w
+            self.stride_h = stride_h
             self._calculate_window_sizes()
         
     def _initialize_data(self) -> tuple[List[np.ndarray], List[np.ndarray], List[tuple[str, str, str]], List[int]]:
@@ -156,15 +160,15 @@ class NpyDataset(Dataset):
             h = self._get_shape(i, 'z')
             # slice 1
             w = self._get_shape(i, 'y')
-            n_h = max(0, (h - self.window_y) // self.stride + 1)
-            n_w = max(0, (w - self.window_x) // self.stride + 1)
+            n_h = max(0, (h - self.window_h) // self.stride_h + 1)
+            n_w = max(0, (w - self.window_w) // self.stride_w + 1)
             
             ws['s1'] = (n_h, n_w)
             
             # slice 2
             w = self._get_shape(i, 'x')
-            n_h = max(0, (h - self.window_y) // self.stride + 1)
-            n_w = max(0, (w - self.window_x) // self.stride + 1)
+            n_h = max(0, (h - self.window_h) // self.stride_h + 1)
+            n_w = max(0, (w - self.window_w) // self.stride_w + 1)
             
             ws['s2'] = (n_h, n_w)
             
@@ -365,12 +369,12 @@ class NpyDataset(Dataset):
         row = idx // ws[1]
         col = idx % ws[1]
         
-        st_h = row * self.stride
-        st_w = col * self.stride
+        st_h = row * self.stride_h
+        st_w = col * self.stride_w
         
         # print ("window at", st_h, st_w, " with shape: ", dt.shape)
-        dt = dt[st_h:st_h+self.window_y, st_w:st_w+self.window_x]
-        lb = lb[st_h:st_h+self.window_y, st_w:st_w+self.window_x]
+        dt = dt[st_h:st_h+self.window_h, st_w:st_w+self.window_w]
+        lb = lb[st_h:st_h+self.window_h, st_w:st_w+self.window_w]
         return dt, lb
     
     def __del__(self):
@@ -392,9 +396,10 @@ class NpyDataset(Dataset):
             'ltype': str(self.ltype),
             'norm': self.norm if hasattr(self, 'norm') else False,
             'mode': self.mode,
-            'window_x': self.window_x,
-            'window_y': self.window_y,
-            'stride': self.stride
+            'window_w': self.window_w,
+            'window_h': self.window_h,
+            'stride_w': self.stride_w,
+            'stride_h': self.stride_h
         }
         return config
            
@@ -456,10 +461,10 @@ class NpyDataset(Dataset):
             return cls(**config)        
     
     @staticmethod
-    def create_windowed_collate_fn(self, norm_flag: bool = True, window_x: int = 128, window_y: int = 128, stride: int = 30):
+    def create_windowed_collate_fn(self, norm_flag: bool = True, window_w: int = 128, window_h: int = 128, stride_w: int = 30, stride_h: int = 30):
         """
         Create a collate function that return windowed slices:
-            if in windowed mode, the collate function would use a batch of windowed slices as specified by the class parameters, and return them 
+            if in windowed mode, the collate function would use a batch of windowed slices (windowed dataset) as specified by the class parameters, not the function, and return them 
              - Here you would get the same number of samples as the batch size
              - norm_falg: normalize each window in the batch
                 - Note: if the dataset normalization flag is on then this would result in applying normalization twice on each window
@@ -502,8 +507,8 @@ class NpyDataset(Dataset):
                     label = torch.from_numpy(item[1])
                     
                     # Window the data and labels
-                    data_windows = data.unfold(0, window_y, stride).unfold(1, window_x, stride)
-                    label_windows = label.unfold(0, window_y, stride).unfold(1, window_x, stride)
+                    data_windows = data.unfold(0, window_h, stride_h).unfold(1, window_w, stride_w)
+                    label_windows = label.unfold(0, window_h, stride_h).unfold(1, window_w, stride_w)
                     
                     # Reshape to have all windows as the first dimension
                     h, w, window_h, window_w = data_windows.shape
@@ -542,8 +547,8 @@ class NpyDataset(Dataset):
                     label = torch.from_numpy(item[1]) # shape: (z, )
                     
                     # window over the z axis
-                    data_windows = data.unfold(0, window_x, stride)
-                    label_windows = label.unfold(0, window_x, stride)
+                    data_windows = data.unfold(0, window_w, stride_w)
+                    label_windows = label.unfold(0, window_w, stride_w)
                     
                     # Reshape to have all windows as the first dimension
                     h, window_h = data_windows.shape

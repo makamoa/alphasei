@@ -474,6 +474,10 @@ class NpyDataset(Dataset):
             - The number of samples returned would be the number of windows created using these slices
             - norm_falg: normalize each window in the batch
                 - Note: if the dataset normalization flag is on then this would result in applying normalization twice (once on the slice and once on the window)
+            
+            if in traces mode, the collate function would use a batch of traces, window them and return them
+            - Here your batch is how many traces to use
+            
         """
     
         if self.mode == 'windowed':            
@@ -511,9 +515,9 @@ class NpyDataset(Dataset):
                     label_windows = label.unfold(0, window_h, stride_h).unfold(1, window_w, stride_w)
                     
                     # Reshape to have all windows as the first dimension
-                    h, w, window_h, window_w = data_windows.shape
-                    data_windows = data_windows.reshape(-1, window_h, window_w)
-                    label_windows = label_windows.reshape(-1, window_h, window_w)
+                    h, w, w_h, w_w = data_windows.shape
+                    data_windows = data_windows.reshape(-1, w_h, w_w)
+                    label_windows = label_windows.reshape(-1, w_h, w_w)
                     
                     # print (data_windows.shape, label_windows.shape)
                     

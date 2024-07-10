@@ -13,7 +13,8 @@ class NpyDataset(Dataset):
                  lb_transformations: Union[List[callable], callable] = [],
                  dtype: np.dtype = np.float32,
                  ltype: np.dtype = np.float32, 
-                 norm: bool = False,
+                 norm: int = 0,
+                 stride: int = 1,
                  mode: str = 'slice', 
                  line_mode: str = 'both',
                  window_w: int = 128,
@@ -29,17 +30,18 @@ class NpyDataset(Dataset):
                 Each dictionary should have the following structure:
                 {
                     'data': str,  # path to data file
-                    'label': str,  # path to label file (optional) - if not provided, labels will be zeros
+                    'label': str,  # path to label file (optional) - if not provided, labels will be zeros (can be ignored/used in testing)
                     'order': Tuple[str, str, str],  # e.g., ('x', 'y', 'z') 
                     'range': [Dict[str, Tuple[float, float]]]  # e.g., {'x': (0, 1), 'y': (0, 1), 'z': (0, 1)} (optional: any missing dimension will default to full range)
                 }
-            mode (str): The mode to use for the dataset. Options: 'windowed', 'slice', 'traces'.
-            line_mode (str): The line mode to use for slice and windowed modes. Options: 'both', 'iline', 'xline'.
             dt_transformations (Optional[Union[List[Callable], Callable]]): Transformations to apply to the data.
             lb_transformations (Optional[Union[List[Callable], Callable]]): Transformations to apply to the labels.
             dtype (np.dtype): The datatype to use for the data.
             ltype (np.dtype): The datatype to use for the labels.
-            norm (bool): Whether to normalize the data when loading.
+            norm (int): Whether to normalize the data when loading. (0 = no normalization, 1 = normalize before applying transformations, 2 = normalize after applying transformations)
+            stride (int): The stride to use when creating slices or windows (default: 1). a.k.a. steps or jumps when indexing the data.
+            mode (str): The mode to use for the dataset. Options: 'windowed', 'slice', 'traces'.
+            line_mode (str): The line mode to use for slice and windowed modes. Options: 'both', 'iline', 'xline'.
             window_w (int): The width of the windowed slice (only used in 'windowed' mode).
             window_h (int): The height of the windowed slice (only used in 'windowed' mode).
             stride_w (int): The stride to use when creating windowed slices on width (only used in 'windowed' mode).
@@ -50,13 +52,17 @@ class NpyDataset(Dataset):
         self.paths = self._validate_paths(paths)
         self.dtype = np.dtype(dtype)
         self.ltype = np.dtype(ltype)
+        self.norm = norm
+        self.stride = stride
         
         self.dt_t = self._setup_transformations(dt_transformations)
         self.lb_t = self._setup_transformations(lb_transformations)
-        self.norm = norm
         
-        if norm and not any([t.__name__ == 'normalize_item' for t in self.dt_t]): 
-            self.dt_t.append(normalize_item)
+        if not any([t.__name__ == 'normalize_item' for t in self.dt_t]): 
+            if self.norm == 1:
+                self.dt_t.insert(0, normalize_item)
+            elif self.norm == 2:
+                self.dt_t.append(normalize_item)
         
         self.window_params = {
             'window_w': window_w,
@@ -162,48 +168,35 @@ class NpyDataset(Dataset):
             labels.append(_lb)
             orders.append(path['order'])
             ranges.append((x_st, x_end, y_st, y_end))
-            if self.mode == 'traces':
-                n_items.append((x_end - x_st) * (y_end - y_st))
+            n_x = ((x_end - x_st) + (self.stride - 1))//self.stride
+            n_y = ((y_end - y_st) + (self.stride - 1))//self.stride
+
+            if self.mode == 'traces':                                
+                n_items.append(n_x * n_y)
             elif self.mode == 'slice':
                 if self.line_mode == "both":
-                    n_items.append((x_end - x_st) + (y_end - y_st))
+                    n_items.append(n_x + n_y)
                 elif self.line_mode == "iline":
-                    n_items.append(x_end - x_st)
+                    n_items.append(n_x)
                 else: 
-                    n_items.append(y_end - y_st)
+                    n_items.append(n_y)
             else:
                 # windows mode:
                 ws = self._calculate_window_size(z_end - z_st, y_end - y_st, x_end - x_st)
                 window_sizes.append(ws)
                 if self.line_mode == "both":
-                    n_i = ws['s1'][0] * ws['s1'][1] * (x_end - x_st) + ws['s2'][0] * ws['s2'][1] * (y_end - y_st)
+                    n_i = ws['s1'][0] * ws['s1'][1] * (n_x) + ws['s2'][0] * ws['s2'][1] * (n_y)
                 elif self.line_mode == "iline":
-                    n_i = ws['s1'][0] * ws['s1'][1] * (x_end - x_st)
+                    n_i = ws['s1'][0] * ws['s1'][1] * (n_x)
                 else:
-                    n_i = ws['s2'][0] * ws['s2'][1] * (y_end - y_st)
+                    n_i = ws['s2'][0] * ws['s2'][1] * (n_y)
                     
                 n_items.append(n_i)
             
         return data, labels, orders, ranges, n_items, window_sizes
     
     def __len__(self) -> int:
-        if self.mode == 'slice':
-            return self._slices_len()
-        elif self.mode == 'windowed':
-            return self._windowed_slices_len()
-        elif self.mode == 'traces':
-            return self._num_traces()
-        else:
-            raise ValueError(f"Invalid mode {self.mode}")
-    
-    def _num_traces(self) -> int:
         return sum(self.n_items_per_file)
-    
-    def _slices_len(self) -> int: 
-        return sum(self.n_items_per_file)
-    
-    def _windowed_slices_len(self) -> int:
-        return sum([ws['s1'][0] * ws['s1'][1] *self._get_shape(i, 'x') + ws['s2'][0] * ws['s2'][1] * self._get_shape(i, 'y') for i,  ws in enumerate (self.window_sizes)])
     
     def _get_shape (self, f_idx: int, dim: str) -> int:
         _dt = self.raw_data[f_idx]
@@ -213,10 +206,12 @@ class NpyDataset(Dataset):
             return _dt.shape[_pos]
         if dim == 'x': 
             x_st, x_end, _, _ = self.ranges[f_idx]
-            return x_end - x_st
+            n_x = ((x_end - x_st) + (self.stride - 1))//self.stride
+            return n_x
         if dim == 'y':
             _, _, y_st, y_end = self.ranges[f_idx]
-            return y_end - y_st
+            n_y = ((y_end - y_st) + (self.stride - 1))//self.stride
+            return n_y
         
         raise ValueError(f"Invalid dimension {dim}")
     
@@ -246,16 +241,20 @@ class NpyDataset(Dataset):
             return self._get_trace(idx)
         else:
             raise ValueError(f"Invalid mode {self.mode}")       
-        
-    def _get_trace(self, idx: int) -> tuple [np.ndarray]:
-        """
-        Get the trace at the given index and its label
-        """
+   
+    def _find_file (self, idx: int) -> int:
         _idx = idx
         _file_idx = 0
         while _idx >= self.n_items_per_file[_file_idx]:
             _idx -= self.n_items_per_file[_file_idx]
             _file_idx += 1
+        return _file_idx
+        
+    def _get_trace(self, idx: int) -> tuple [np.ndarray]:
+        """
+        Get the trace at the given index and its label
+        """
+        _file_idx = self._find_file(idx)
         
         # print ("in file", _file_idx, "index", _idx, "total items", self.n_items_per_file[_file_idx])
         
@@ -268,34 +267,29 @@ class NpyDataset(Dataset):
         
         # print ("searching for which iline in: ", (_rg[3] , " to ",  _rg[2]))
         
-        iline_idx = idx // (_rg[3] - _rg[2]) + _rg[2]
+        iline_offset = _rg[0]
+        xline_offset = _rg[2]
+        
+        n_ilines = (_rg[3] - _rg[2] + self.stride - 1) // self.stride
+        
+        iline_idx = (idx // (n_ilines)) * self.stride + iline_offset
         
         # print ("getting iline at", iline_idx)
         
         iline_idx = (slice(None),  iline_idx, slice(None))
-        
 
         # get the iline slice of the data
         _dt = get_transposed_slice(_dt, _or, ('z', 'x', 'y'), iline_idx).astype(self.dtype)
         _lb = get_transposed_slice(_lb, _or, ('z', 'x', 'y'), iline_idx).astype(self.ltype)
         # shape: (z, x)
         
-        # print (_dt.shape, _lb.shape)
-        
-        
         # find which trace to get
-        trace_idx = idx % (_rg[3] - _rg[2]) + _rg[2]
-        
-        # print ("getting trace number:", trace_idx)
+        trace_idx = (idx % n_ilines) * self.stride + xline_offset
         
         _dt = _dt[:, trace_idx]
         _lb = _lb[:, trace_idx]
         
-        for t in self.dt_t:
-            _dt = t(_dt)
-        
-        for t in self.lb_t:
-            _lb = t(_lb)
+        _dt, _lb = self._apply_transformations(_dt, _lb)
             
         return _dt, _lb
         
@@ -303,13 +297,8 @@ class NpyDataset(Dataset):
         """
         Get the slice of seismic data and labels
         """
-        assert idx < len(self), f"Index {idx} out of bounds"
         # find the file that contains the index
-        _idx = idx
-        _file_idx = 0
-        while _idx >= self.n_items_per_file[_file_idx]:
-            _idx -= self.n_items_per_file[_file_idx]
-            _file_idx += 1
+        _file_idx = self._find_file(idx)
         
         _dt = self.raw_data[_file_idx]
         _lb = self.raw_labels[_file_idx]
@@ -319,25 +308,30 @@ class NpyDataset(Dataset):
         idx -= sum(self.n_items_per_file[:_file_idx])
         
         # find the 'x' index in _or
-        x_dim = self._get_shape(_file_idx, 'x')
+        n_ilines = self._get_shape(_file_idx, 'x')
         
         if self.line_mode == "both":
             # assuming the data is transposed to ('z', 'x', 'y') -- done on the fly later on 
-            if idx < x_dim:
+            if idx < n_ilines:
                 # indexing along the x axis
+                idx *= self.stride # convert to the actual index
                 idx += _rg[0] # add the starting index
                 y_slice = slice(_rg[2], _rg[3]) # get the y slice
                 idx = (slice(None), idx, y_slice)
             else:
                 # indexing along the y axis
+                idx -= n_ilines
+                idx *= self.stride # convert to the actual index
                 idx += _rg[2] # add the starting index
                 x_slice = slice(_rg[0], _rg[1]) # get the x slice
-                idx = (slice(None), x_slice, idx - x_dim)
+                idx = (slice(None), x_slice, idx)
         elif self.line_mode == "iline":
+            idx *= self.stride # convert to the actual index
             idx += _rg[0]
             y_slice = slice(_rg[2], _rg[3]) # get the y slice
             idx = (slice(None), idx, y_slice)
         else: 
+            idx *= self.stride # convert to the actual index
             idx += _rg[2]
             x_slice = slice(_rg[0], _rg[1]) # get the x slice
             idx = (slice(None), x_slice, idx)
@@ -346,23 +340,15 @@ class NpyDataset(Dataset):
         _dt = get_transposed_slice(_dt, _or, ('z', 'x', 'y'), idx).astype(self.dtype)
         _lb = get_transposed_slice(_lb, _or, ('z', 'x', 'y'), idx).astype(self.ltype)
         
-        for t in self.dt_t:
-            _dt = t(_dt)
-        
-        for t in self.lb_t:
-            _lb = t(_lb)
+        _dt, _lb = self._apply_transformations(_dt, _lb)
         
         return _dt, _lb
     
     def _get_windowed_slice(self, idx: int) -> tuple [np.ndarray, np.ndarray]:
         # find the file that contains the index
-        _idx = idx
-        _file_idx = 0
-        while _idx >= self.n_items_per_file[_file_idx]:
-            _idx -= self.n_items_per_file[_file_idx]
-            _file_idx += 1
+        _file_idx = self._find_file(idx)
         
-        # print ("File at", _file_idx, "index now at", _idx)
+        _idx = idx - sum(self.n_items_per_file[:_file_idx])
         
         _dt = self.raw_data[_file_idx]
         _lb = self.raw_labels[_file_idx]
@@ -372,12 +358,16 @@ class NpyDataset(Dataset):
         
         # find the slice that contains the index
         # s1 moves along the x axis first
-        x_dim = self._get_shape(_file_idx, 'x')
+        n_iline = self._get_shape(_file_idx, 'x')
         
         if self.line_mode == "both":
-            if _idx < _ws['s1'][0] * _ws['s1'][1] * x_dim:
+            if _idx < _ws['s1'][0] * _ws['s1'][1] * n_iline:
                 # along the x axis
                 slice_idx = _idx // (_ws['s1'][0] * _ws['s1'][1])
+                
+                slice_idx *= self.stride # convert to the actual index
+                slice_idx += _rg[0] # add the starting index
+                
                 y_slice = slice(_rg[2], _rg[3]) # get the y slice
                 slice_idx = (slice(None), slice_idx, y_slice)
                 
@@ -386,22 +376,36 @@ class NpyDataset(Dataset):
                 _ws = _ws['s1']
             else:
                 # from a crossline
-                slice_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * x_dim) // (_ws['s2'][0] * _ws['s2'][1])
+                slice_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * n_iline) // (_ws['s2'][0] * _ws['s2'][1])
+                slice_idx *= self.stride # convert to the actual index
+                slice_idx += _rg[2] # add the starting index
+                
+            
                 x_slice = slice(_rg[0], _rg[1]) # get the x slice
                 slice_idx = (slice(None), x_slice, slice_idx)
                 
-                window_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * x_dim) % (_ws['s2'][0] * _ws['s2'][1])
-                _ws = _ws['s2']
+                
+                window_idx = (_idx - _ws['s1'][0] * _ws['s1'][1] * n_iline) % (_ws['s2'][0] * _ws['s2'][1])
                 # print ("getting a xline at ", slice_idx, "window at", window_idx)
+                _ws = _ws['s2']
+            
         elif self.line_mode == "iline":
+            
             slice_idx = _idx // (_ws['s1'][0] * _ws['s1'][1])
+            slice_idx *= self.stride # convert to the actual index
+            slice_idx += _rg[0] # add the starting index
+            
             y_slice = slice(_rg[2], _rg[3])
             slice_idx = (slice(None), slice_idx, y_slice)
             
             window_idx = _idx % (_ws['s1'][0] * _ws['s1'][1])
             _ws = _ws['s1']    
         else: 
+            
             slice_idx = _idx // (_ws['s2'][0] * _ws['s2'][1])
+            slice_idx *= self.stride # convert to the actual index
+            slice_idx += _rg[2] # add the starting index
+            
             x_slice = slice(_rg[0], _rg[1])
             slice_idx = (slice(None), x_slice, slice_idx)
             
@@ -414,11 +418,7 @@ class NpyDataset(Dataset):
         # get the window from the slice 
         _dt, _lb = self._get_window(_dt, _lb, window_idx, _ws)
         
-        for t in self.dt_t:
-            _dt = t(_dt)
-            
-        for t in self.lb_t:
-            _lb = t(_lb)
+        _dt, _lb = self._apply_transformations(_dt, _lb)
             
         return _dt, _lb
     
@@ -434,6 +434,15 @@ class NpyDataset(Dataset):
         # print ("window at", st_h, st_w, " with shape: ", dt.shape)
         dt = dt[st_h:st_h+self.window_params['window_h'], st_w:st_w+self.window_params['window_w']]
         lb = lb[st_h:st_h+self.window_params['window_h'], st_w:st_w+self.window_params['window_w']]
+        return dt, lb
+    
+    def _apply_transformations(self, dt: np.ndarray, lb: np.ndarray) -> tuple [np.ndarray, np.ndarray]:
+        for t in self.dt_t:
+            dt = t(dt)
+        
+        for t in self.lb_t:
+            lb = t(lb)
+        
         return dt, lb
     
     def __del__(self):

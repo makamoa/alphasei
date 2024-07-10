@@ -1,6 +1,7 @@
 import numpy as np
 import torch 
-from pytorch_msssim import ms_ssim
+from pytorch_msssim import ms_ssim, ssim
+from math import exp
 
 class RegressionMetricsFull:
     """
@@ -9,10 +10,13 @@ class RegressionMetricsFull:
     All predictions and true values are accumulated in memory.
     """
     
-    def __init__(self, data_range: float):
+    def __init__(self, data_range: float, window_size: int = 11, normalize: bool = True):
         self.data_range = data_range # for PSNR and MS-SSIM
+        self.window_size = window_size
+        self.normalize = normalize
         self.pred = []
         self.true = []
+        
         
     @torch.no_grad()
     def update(self, pred: torch.Tensor, true: torch.Tensor):
@@ -24,6 +28,9 @@ class RegressionMetricsFull:
         """Reset all accumulated values."""
         self.pred = []
         self.true = []
+        
+    def _normalize_ssim(self, value):
+        return (value + 1) / 2 if self.normalize else value
     
     @property
     def _preds_and_trues(self):
@@ -58,23 +65,44 @@ class RegressionMetricsFull:
         
         pred = pred.view(-1, 1, self.last_pred.shape[-2], self.last_pred.shape[-1]).clamp(0, self.data_range)
         true = true.view(-1, 1, self.last_true.shape[-2], self.last_true.shape[-1]).clamp(0, self.data_range)
+        """
+        (b, h, w) -> (b, 1, h, w)
+        (h, w) -> (1, 1, h, w)
+        (b, d, h, w) -> (b*d, 1, h, w)
+        """
+        msssim = ms_ssim(pred, true, data_range=self.data_range, size_average=True, win_size=self.window_size) 
+        return self._normalize_ssim(msssim)
+    
+    @property
+    def ssim(self):
+        """Get the structural similarity index."""
+        pred, true = self._preds_and_trues
         
-        return ms_ssim(pred, true, data_range=self.data_range)
+        pred = pred.view(-1, 1, self.last_pred.shape[-2], self.last_pred.shape[-1]).clamp(0, self.data_range)
+        true = true.view(-1, 1, self.last_true.shape[-2], self.last_true.shape[-1]).clamp(0, self.data_range)
+        """
+        (b, h, w) -> (b, 1, h, w)
+        (h, w) -> (1, 1, h, w)
+        (b, d, h, w) -> (b*d, 1, h, w)
+        """
+        sim = ssim(pred, true, data_range=self.data_range, size_average=True, win_size=self.window_size)
+        return self._normalize_ssim(sim)
     
     @property
     def psnr(self):
         """Get the peak signal-to-noise ratio."""
         if self.mse == 0:
+            Warning.warn("MSE is zero, PSNR is infinite.")
             return float('inf')
         return 20 * torch.log10(self.data_range / torch.sqrt(self.mse))
     
     def __repr__(self):
         """A tabular representation of the metrics."""
-        metrics = ['MSE', 'MS-SSIM', 'PSNR', 'RMSE', 'MAE']
-        values = [self.mse, self.ms_ssim, self.psnr, self.rmse, self.mae]
+        metrics = ['MSE', 'PSNR', 'RMSE', 'MAE', 'MS-SSIM', 'SSIM']
+        values = [self.mse, self.psnr, self.rmse, self.mae, self.ms_ssim, self.ssim]
 
         out = 'Regression Metrics:\n'
-        out += '-' * 50 + '\n'
+        out += '-' * 60 + '\n'
         for metric, value in zip(metrics, values):
             out += f'{metric:<10} {value:.4f}\n'
         return out
@@ -86,9 +114,14 @@ class RegressionMetricsLight:
     Data (preds, and true) is not accumulated in memory, only last batch.
     """
     
-    def __init__ (self, data_range: float):
+    def __init__ (self, data_range: float, window_size: int = 11, normalize: bool = True):
         self.data_range = data_range
+        self.window_size = window_size
+        self.normalize = normalize
         self.reset()
+        
+    def _normalize_ssim(self, value):
+        return (value + 1) / 2 if self.normalize else value
         
     def reset(self):
         """Reset all accumulated statistics."""
@@ -162,13 +195,29 @@ class RegressionMetricsLight:
         
         pred = self.last_pred.view(-1, 1, self.last_pred.shape[-2], self.last_pred.shape[-1]).clamp(0, self.data_range)
         true = self.last_true.view(-1, 1, self.last_true.shape[-2], self.last_true.shape[-1]).clamp(0, self.data_range)
-        
         """
         (b, h, w) -> (b, 1, h, w)
         (h, w) -> (1, 1, h, w)
         (b, d, h, w) -> (b*d, 1, h, w)
         """
-        return ms_ssim(pred, true, data_range=self.data_range)
+        sim =  ms_ssim(pred, true, data_range=self.data_range, size_average=True, win_size=self.window_size)
+        return self._normalize_ssim(sim)
+    
+    @property
+    def ssim(self):
+        """
+        Get the structural similarity index.
+        Shape must be (batch, channel, height, width):
+        """
+        
+        if self.last_pred is None or self.last_true is None:
+            raise ValueError("No data available for SSIM calculation")
+        
+        pred = self.last_pred.view(-1, 1, self.last_pred.shape[-2], self.last_pred.shape[-1]).clamp(0, self.data_range)
+        true = self.last_true.view(-1, 1, self.last_true.shape[-2], self.last_true.shape[-1]).clamp(0, self.data_range)
+        
+        sim = ssim(pred, true, data_range=self.data_range, size_average=True, win_size=self.window_size)
+        return self._normalize_ssim(sim)
     
     
     def __repr__(self):
@@ -177,7 +226,7 @@ class RegressionMetricsLight:
         values = [self.mse, self.rmse, self.mae, self.psnr]
         
         out = 'Regression Metrics:\n'
-        out += '-' * 50 + '\n'
+        out += '-' * 60 + '\n'
         for metric, value in zip(metrics, values):
             out += f'{metric:<10} {value:.4f}\n'
         
@@ -185,6 +234,11 @@ class RegressionMetricsLight:
             out += f'{'MS-SSIM':<10} {self.ms_ssim.item():.4f} (last batch)\n'
         else:
             out += f'{'MS-SSIM':<10} Not available\n'
+        
+        if self.ssim is not None:
+            out += f'{'SSIM':<10} {self.ssim.item():.4f} (last batch)\n'
+        else:
+            out += f'{'SSIM':<10} Not available\n'
         
         return out
         

@@ -112,3 +112,24 @@ class ClassificationMetrics:
         out += '\nWeighted '
         out += ' '.join(map(lambda x: perc(self.weighted(x)), metrics))
         return out
+    
+    def to_tensorboard(self, writer, epoch, prefix):
+                # Log per-class metrics
+        for i in range(self.num_classes):
+            for metric in self.metrics:
+                value = getattr(self, metric)[i]
+                writer.add_scalar(f'{prefix}/{metric}/class_{i}', value, epoch)
+
+        # Log mean metrics
+        for metric in self.metrics:
+            mean_value = getattr(self, f'mean_{metric}')
+            writer.add_scalar(f'{prefix}/{metric}/mean', mean_value, epoch)
+
+        # Log weighted metrics
+        for metric in self.metrics:
+            weighted_value = getattr(self, f'weighted_{metric}')
+            writer.add_scalar(f'{prefix}/{metric}/weighted', weighted_value, epoch)
+
+        # Log overall accuracy
+        overall_accuracy = self.tp.sum() / self.total
+        writer.add_scalar(f'{prefix}/accuracy/overall', overall_accuracy, epoch)

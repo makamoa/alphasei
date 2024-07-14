@@ -5,6 +5,7 @@ from typing import Dict, Any, Iterator, List, Tuple, Union, _TypingEllipsis
 import torch
 import copy
 import os
+import warnings as Warning
 
 class NpyDataset(Dataset):
     def __init__(self,
@@ -147,22 +148,29 @@ class NpyDataset(Dataset):
                     x_st = (int) (x_range[0] * _dt.shape[x_pos])
                     x_end = (int) (x_range[1] * _dt.shape[x_pos])
                 else: 
-                    Warning.warn(f"No range specified for x in path {path}, defaulting to full range")
+                    msg = (f"No range specified for x in path {path}, defaulting to full range")
+                    Warning.warn(msg)
                 
                 if 'y' in path ['range']:
                     y_range = path['range']['y']
                     y_st = (int) (y_range[0] * _dt.shape[y_pos])
                     y_end = (int) (y_range[1] * _dt.shape[y_pos])
-                else: 
-                    Warning.warn(f"No range specified for y in path {path}, defaulting to full range")
+                else:
+                    msg = (f"No range specified for y in path {path}, defaulting to full range") 
+                    Warning.warn(msg)
                 
                 if 'z' in path ['range']:    
                     z_range = path['range']['z']
                     z_st = (int) (z_range[0] * _dt.shape[_or.index('z')])
                     z_end = (int) (z_range[1] * _dt.shape[_or.index('z')])
+                    
+                    msg = (f"Range specified for z in path: {path}, slicing the data and labels from (0, {_dt.shape[_or.index('z')]}) to ({z_st}, {z_end})")
+                    
                     _dt = _dt[z_st:z_end]
                     _lb = _lb[z_st:z_end]
-                    Warning.warn(f"Range specified for z in path {path}, slicing the data and labels to ({z_st}, {z_end})")
+                    Warning.warn(msg)
+            
+            print(x_st, x_end, y_st, y_end, z_st, z_end)
             
             data.append(_dt)
             labels.append(_lb)
@@ -514,21 +522,26 @@ class NpyDataset(Dataset):
         return config
     
     @classmethod
-    def from_config(cls, path: str) -> 'NpyDataset':
+    def from_config_path(cls, path: str) -> 'NpyDataset':
         """
         Load the metadata of the dataset from a given path
         """
         with open(path, 'r') as f:
             config = json.load(f)
-            config['dtype'] = np.dtype(config['dtype'])
-            config['ltype'] = np.dtype(config['ltype'])
-            
-            # Recreate transformation functions (assuming they are defined in the global scope)
-            config['dt_transformations'] = [globals()[name] for name in config['dt_transformations']]
-            config['lb_transformations'] = [globals()[name] for name in config['lb_transformations']]
-            
-            # print (config)
-            return cls(**config)
+            return cls.from_config(config)
+    
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'NpyDataset':
+        config['dtype'] = np.dtype(config['dtype'])
+        config['ltype'] = np.dtype(config['ltype'])
+        
+        print (os.getcwd())
+        
+        # Recreate transformation functions (assuming they are defined in the global scope)
+        config['dt_transformations'] = [globals()[name] for name in config['dt_transformations']]
+        config['lb_transformations'] = [globals()[name] for name in config['lb_transformations']]
+        
+        return cls(**config)
         
     def add_transforms(self, dt: List[callable] = [], lb: List[callable] = [], show_order: bool = False):
         """

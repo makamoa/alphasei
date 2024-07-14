@@ -1,0 +1,1 @@
+python3 src/train.py --modelType $1 --modelConfig $2 --datasetType $3 --datasetConfig $4 --trainConfig $5

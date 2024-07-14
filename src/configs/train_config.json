@@ -1,0 +1,29 @@
+{
+    "loss": {
+        "type": "crossentropy"
+    },
+    "optimizer": "Adam",
+    "optimizer_params": {
+        "lr": 0.001
+    },
+    "scheduler": "StepLR",
+    "scheduler_params": {
+        "step_size": 10,
+        "gamma": 0.1
+    },
+    "metrics": "classification",
+    "metrics_params": {
+        "data_range": 1.0,
+        "full": true,
+        "num_classes": 6
+    },
+    "data_transforms": {
+        "type": "slice",
+        "transformations": []
+    },
+    "label_transforms": {
+        "type": "slice",
+        "transformations": []
+    },
+    "epochs": 2
+}

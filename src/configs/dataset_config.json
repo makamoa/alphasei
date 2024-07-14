@@ -1,0 +1,80 @@
+{
+    "train": {
+        "paths": [
+            {
+                "data": "/Users/alkhalmr/aramco/alphasei/src/dataset/data/SEAM/seismic_train.npy",
+                "label": "/Users/alkhalmr/aramco/alphasei/src/dataset/data/SEAM/labels.npy",
+                "order": [
+                    "z",
+                    "x",
+                    "y"
+                ],
+                "range": {
+                    "x": [
+                        0,
+                        0.3
+                    ],
+                    "y": [
+                        0,
+                        0.5
+                    ],
+                    "z": [
+                        0,
+                        0.3
+                    ]
+                }
+            }
+        ],
+        "dt_transformations": [],
+        "lb_transformations": [],
+        "dtype": "float32",
+        "ltype": "float32",
+        "norm": 0,
+        "mode": "slice",
+        "line_mode": "iline",
+        "window_w": 128,
+        "window_h": 128,
+        "stride_w": 64,
+        "stride_h": 64
+    },
+    "val": {
+        "paths": [
+            {
+                "data": "/Users/alkhalmr/aramco/alphasei/src/dataset/data/SEAM/seismic_train.npy",
+                "label": "/Users/alkhalmr/aramco/alphasei/src/dataset/data/SEAM/labels.npy",
+                "order": [
+                    "z",
+                    "x",
+                    "y"
+                ],
+                "range": {
+                    "x": [
+                        0.3,
+                        0.5
+                    ],
+                    "y": [
+                        0,
+                        0.5
+                    ],
+                    "z": [
+                        0,
+                        0.3
+                    ]
+                }
+            }
+        ],
+        "dt_transformations": [],
+        "lb_transformations": [],
+        "dtype": "float32",
+        "ltype": "float32",
+        "norm": 0,
+        "mode": "slice",
+        "line_mode": "iline",
+        "window_w": 128,
+        "window_h": 128,
+        "stride_w": 64,
+        "stride_h": 64
+    },
+    "batch_size": 16,
+    "num_workers": 0
+}

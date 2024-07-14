@@ -106,6 +106,22 @@ class RegressionMetricsFull:
         for metric, value in zip(metrics, values):
             out += f'{metric:<10} {value:.4f}\n'
         return out
+    
+    def to_tensorboard(self, writer, epoch, prefix):
+        """
+        Log metrics to TensorBoard.
+
+        Args:
+            writer (SummaryWriter): The TensorBoard SummaryWriter instance.
+            epoch (int): The current epoch number.
+            prefix (str): A prefix for the metric names (e.g., 'train' or 'val').
+        """
+        writer.add_scalar(f'{prefix}/MSE', self.mse, epoch)
+        writer.add_scalar(f'{prefix}/RMSE', self.rmse, epoch)
+        writer.add_scalar(f'{prefix}/MAE', self.mae, epoch)
+        writer.add_scalar(f'{prefix}/PSNR', self.psnr, epoch)
+        writer.add_scalar(f'{prefix}/MS-SSIM', self.ms_ssim, epoch)
+        writer.add_scalar(f'{prefix}/SSIM', self.ssim, epoch)
         
 class RegressionMetricsLight:
     """
@@ -241,4 +257,24 @@ class RegressionMetricsLight:
             out += f'{'SSIM':<10} Not available\n'
         
         return out
+    
+    def to_tensorboard(self, writer, epoch, prefix):
+        """
+        Log metrics to TensorBoard.
+
+        Args:
+            writer (SummaryWriter): The TensorBoard SummaryWriter instance.
+            epoch (int): The current epoch number.
+            prefix (str): A prefix for the metric names (e.g., 'train' or 'val').
+        """
+        writer.add_scalar(f'{prefix}/MSE', self.mse, epoch)
+        writer.add_scalar(f'{prefix}/RMSE', self.rmse, epoch)
+        writer.add_scalar(f'{prefix}/MAE', self.mae, epoch)
+        writer.add_scalar(f'{prefix}/PSNR', self.psnr, epoch)
+        
+        if self.ms_ssim is not None:
+            writer.add_scalar(f'{prefix}/MS-SSIM (last batch)', self.ms_ssim, epoch)
+        
+        if self.ssim is not None:
+            writer.add_scalar(f'{prefix}/SSIM (last batch)', self.ssim, epoch)
         
